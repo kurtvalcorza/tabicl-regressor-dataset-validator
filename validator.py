@@ -78,13 +78,15 @@ def notify_done_callback() -> dict[str, Any]:
 def _normalize_member(name: str) -> str | None:
     if not name or name.endswith("/"):
         return None
-    normalized = name.replace("\\", "/").lstrip("./")
+    normalized = name.replace("\\", "/")
     parts = Path(normalized).parts
-    if any(part == ".." for part in parts):
+    # Reject absolute paths and parent-directory traversal BEFORE stripping
+    # anything (Path() has already collapsed any leading "./").
+    if normalized.startswith("/") or ".." in parts:
         raise ValueError(f"unsafe archive member: {name}")
     if len(parts) > 1 and parts[0].lower() in {"dataset", "datasets"}:
-        normalized = str(Path(*parts[1:]))
-    return normalized
+        parts = parts[1:]
+    return "/".join(parts) if parts else None
 
 
 @dataclass(frozen=True)
@@ -169,6 +171,13 @@ def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[
     checks: list[dict[str, Any]] = []
     meta: dict[str, Any] = {"targetColumn": target_column, "dropColumns": drop_columns}
 
+    checks.append(_check(
+        "target_not_dropped",
+        target_column not in drop_columns,
+        f"target_column {target_column!r} must not appear in drop_columns."
+        if target_column in drop_columns
+        else f"target_column {target_column!r} is not listed in drop_columns.",
+    ))
     checks.append(_check("no_nested_zip", not source.has_nested_zip(), "No nested zip found." if not source.has_nested_zip() else "A nested zip was found; upload CSVs directly."))
     try:
         train_entry = source.unique_csv("train", required=True)
