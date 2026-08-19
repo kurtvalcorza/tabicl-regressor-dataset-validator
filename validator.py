@@ -25,6 +25,7 @@ MAX_SAMPLE_FILES = int(os.getenv("DIMER_MAX_SAMPLE_FILES", "25"))
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = int(os.getenv("DIMER_MAX_ARCHIVE_UNCOMPRESSED_BYTES", str(1 << 30)))
 MAX_SINGLE_CSV_BYTES = int(os.getenv("DIMER_MAX_SINGLE_CSV_BYTES", str(512 << 20)))
 MIN_TRAIN_ROWS = 50
+MIN_EVAL_ROWS = 10
 MAX_FEATURES = 2_000
 
 
@@ -226,12 +227,24 @@ def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[
             continue
         checks.append(_check(f"{stem}_csv_unique", True, f"Using {entry.logical_path}."))
         try:
-            sample = source.read_csv(entry, nrows=5)
+            frame = source.read_csv(entry)  # full split, not just a 5-row schema sample
         except Exception as exc:  # noqa: BLE001
             checks.append(_check(f"{stem}_csv_parses", False, f"{stem}.csv could not be parsed: {exc}"))
             continue
-        same = set(sample.columns) == train_set
+        same = set(frame.columns) == train_set
         checks.append(_check(f"{stem}_schema_matches_train", same, f"{stem}.csv schema matches train.csv." if same else f"{stem}.csv columns differ from train.csv."))
+        if not same or target_column not in frame.columns:
+            continue
+        # _clean_frame can empty a split by removing every non-finite target;
+        # verify the full split still has enough usable numeric targets to score.
+        numeric = pd.to_numeric(frame[target_column], errors="coerce")
+        finite = numeric.notna() & np.isfinite(numeric.to_numpy(dtype=float, na_value=np.nan))
+        n_usable = int(finite.sum())
+        checks.append(_check(
+            f"{stem}_has_usable_targets",
+            n_usable >= MIN_EVAL_ROWS,
+            f"{n_usable} finite numeric {stem} targets after cleaning; need at least {MIN_EVAL_ROWS}.",
+        ))
 
     return checks, meta
 

@@ -70,3 +70,16 @@ def test_target_in_drop_columns_is_rejected(tmp_path, monkeypatch):
     finally:
         source.close()
     assert not next(c for c in checks if c["name"] == "target_not_dropped")["successful"]
+
+
+def test_val_split_target_usability_is_validated(tmp_path, monkeypatch):
+    pd.DataFrame({"x": range(60), "target": [float(i) for i in range(60)]}).to_csv(tmp_path / "train.csv", index=False)
+    # val schema matches but every target is non-numeric -> 0 usable after cleaning
+    pd.DataFrame({"x": range(20), "target": ["bad"] * 20}).to_csv(tmp_path / "val.csv", index=False)
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    source = validator.DatasetSource()
+    try:
+        checks, _ = validator.build_checks(source, {})
+    finally:
+        source.close()
+    assert not next(c for c in checks if c["name"] == "val_has_usable_targets")["successful"]
