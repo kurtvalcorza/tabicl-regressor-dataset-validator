@@ -20,13 +20,46 @@ TEMPLATE_NAME = "tabicl-regressor-dataset-validator"
 DATASET_DIR = Path(os.getenv("DIMER_DATASET_DIR", "/data/dataset"))
 RESULT_PATH = Path(os.getenv("DIMER_RESULT_PATH", "/data/dataset-validations/result.json"))
 DONE_CALLBACK = os.getenv("DIMER_DONE_CALLBACK", "").strip()
-CALLBACK_TIMEOUT_SECONDS = float(os.getenv("DIMER_CALLBACK_TIMEOUT_SECONDS", "10"))
-MAX_SAMPLE_FILES = int(os.getenv("DIMER_MAX_SAMPLE_FILES", "25"))
-MAX_ARCHIVE_UNCOMPRESSED_BYTES = int(os.getenv("DIMER_MAX_ARCHIVE_UNCOMPRESSED_BYTES", str(1 << 30)))
-MAX_SINGLE_CSV_BYTES = int(os.getenv("DIMER_MAX_SINGLE_CSV_BYTES", str(512 << 20)))
 MIN_TRAIN_ROWS = 50
 MIN_EVAL_ROWS = 10
 MAX_FEATURES = 2_000
+
+# Numeric/limit configuration. Module-level DEFAULTS (plain literals so import
+# never fails); the values used are (re)loaded from the environment inside run()
+# via _load_limits(), so a malformed platform value produces a structured
+# failure result.json instead of an import-time crash.
+CALLBACK_TIMEOUT_SECONDS = 10.0
+MAX_SAMPLE_FILES = 25
+MAX_ARCHIVE_UNCOMPRESSED_BYTES = 1 << 30
+MAX_SINGLE_CSV_BYTES = 512 << 20
+MAX_COMPRESSION_RATIO = 100.0
+MAX_TOTAL_ROWS = 5_000_000
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    return default if raw is None or raw.strip() == "" else int(raw)
+
+
+def _float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    return default if raw is None or raw.strip() == "" else float(raw)
+
+
+def _load_limits() -> None:
+    """Re-read numeric limits from the environment inside the protected path.
+
+    Malformed values raise here (caught by main() -> failure result.json)
+    instead of crashing at import before result/callback handling exists.
+    """
+    global CALLBACK_TIMEOUT_SECONDS, MAX_SAMPLE_FILES, MAX_ARCHIVE_UNCOMPRESSED_BYTES
+    global MAX_SINGLE_CSV_BYTES, MAX_COMPRESSION_RATIO, MAX_TOTAL_ROWS
+    CALLBACK_TIMEOUT_SECONDS = _float_env("DIMER_CALLBACK_TIMEOUT_SECONDS", 10.0)
+    MAX_SAMPLE_FILES = _int_env("DIMER_MAX_SAMPLE_FILES", 25)
+    MAX_ARCHIVE_UNCOMPRESSED_BYTES = _int_env("DIMER_MAX_ARCHIVE_UNCOMPRESSED_BYTES", 1 << 30)
+    MAX_SINGLE_CSV_BYTES = _int_env("DIMER_MAX_SINGLE_CSV_BYTES", 512 << 20)
+    MAX_COMPRESSION_RATIO = _float_env("DIMER_MAX_COMPRESSION_RATIO", 100.0)
+    MAX_TOTAL_ROWS = _int_env("DIMER_MAX_TOTAL_ROWS", 5_000_000)
 
 
 def _json_env(name: str) -> dict[str, Any]:
@@ -116,8 +149,17 @@ class DatasetSource:
                 logical = _normalize_member(info.filename)
                 if logical is None:
                     continue
-                total += int(info.file_size)
-                self._entries.append(Entry(logical, info, int(info.file_size)))
+                # Zip-bomb guard: reject pathological compression ratios.
+                compressed = int(getattr(info, "compress_size", 0) or 0)
+                uncompressed = int(info.file_size)
+                if compressed > 0 and (uncompressed / compressed) > MAX_COMPRESSION_RATIO:
+                    self._archive.close()
+                    raise ValueError(
+                        f"archive member {info.filename!r} has compression ratio "
+                        f"{uncompressed / compressed:.0f}:1; limit is {MAX_COMPRESSION_RATIO:.0f}:1"
+                    )
+                total += uncompressed
+                self._entries.append(Entry(logical, info, uncompressed))
             if total > MAX_ARCHIVE_UNCOMPRESSED_BYTES:
                 raise ValueError(f"archive expands to {total:,} bytes; limit is {MAX_ARCHIVE_UNCOMPRESSED_BYTES:,}")
         else:
@@ -196,6 +238,11 @@ def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[
 
     columns = list(train.columns)
     meta.update({"columns": columns, "rowCount": int(len(train))})
+    checks.append(_check(
+        "row_count_within_limit",
+        len(train) <= MAX_TOTAL_ROWS,
+        f"train.csv has {len(train)} rows; operational limit is {MAX_TOTAL_ROWS}.",
+    ))
     has_target = target_column in columns
     checks.append(_check("target_column_present", has_target, f"Target column {target_column!r} found." if has_target else f"Target column {target_column!r} not found."))
     if not has_target:
@@ -250,6 +297,7 @@ def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[
 
 
 def run() -> int:
+    _load_limits()
     preprocessing = _json_env("DIMER_PREPROCESSING_ARGS_JSON")
     pipeline_metadata = _json_env("DIMER_PIPELINE_METADATA_JSON")
     source = DatasetSource()

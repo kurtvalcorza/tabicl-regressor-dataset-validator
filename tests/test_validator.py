@@ -1,5 +1,7 @@
 import importlib.util
+import json
 import sys
+import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -12,6 +14,12 @@ validator = importlib.util.module_from_spec(SPEC)
 # sys.modules by __module__; unregistered -> AttributeError on 3.11).
 sys.modules["validator"] = validator
 SPEC.loader.exec_module(validator)
+
+
+@pytest.fixture(autouse=True)
+def _reset_limits():
+    validator._load_limits()
+    yield
 
 
 def test_numeric_target_and_usable_rows(tmp_path, monkeypatch):
@@ -50,6 +58,37 @@ def test_non_numeric_target_rejected(tmp_path, monkeypatch):
     finally:
         source.close()
     assert not next(c for c in checks if c["name"] == "target_is_numeric")["successful"]
+
+
+def test_malformed_numeric_env_yields_structured_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("DIMER_MAX_SINGLE_CSV_BYTES", "not-an-int")
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    monkeypatch.setattr(validator, "RESULT_PATH", tmp_path / "result.json")
+    assert validator.main() == 1
+    payload = json.loads((tmp_path / "result.json").read_text())
+    assert payload["successful"] is False
+
+
+def test_compression_ratio_rejected(tmp_path, monkeypatch):
+    zpath = tmp_path / "dataset.zip"
+    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("train.csv", "x,target\n" + ("0,0\n" * 200_000))  # highly compressible
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    with pytest.raises(ValueError, match="compression ratio"):
+        validator.DatasetSource()
+
+
+def test_row_count_limit_enforced(tmp_path, monkeypatch):
+    monkeypatch.setenv("DIMER_MAX_TOTAL_ROWS", "10")
+    validator._load_limits()
+    pd.DataFrame({"x": range(60), "target": [float(i) for i in range(60)]}).to_csv(tmp_path / "train.csv", index=False)
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    source = validator.DatasetSource()
+    try:
+        checks, _ = validator.build_checks(source, {})
+    finally:
+        source.close()
+    assert not next(c for c in checks if c["name"] == "row_count_within_limit")["successful"]
 
 
 def test_normalize_member_rejects_traversal_and_absolute():
