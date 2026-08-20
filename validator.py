@@ -53,30 +53,37 @@ def _load_limits() -> None:
     Malformed values raise here (caught by main() -> failure result.json)
     instead of crashing at import before result/callback handling exists.
     """
-    global CALLBACK_TIMEOUT_SECONDS, MAX_SAMPLE_FILES, MAX_ARCHIVE_UNCOMPRESSED_BYTES
-    global MAX_SINGLE_CSV_BYTES, MAX_COMPRESSION_RATIO, MAX_TOTAL_ROWS
-    CALLBACK_TIMEOUT_SECONDS = _float_env("DIMER_CALLBACK_TIMEOUT_SECONDS", 10.0)
-    MAX_SAMPLE_FILES = _int_env("DIMER_MAX_SAMPLE_FILES", 25)
-    MAX_ARCHIVE_UNCOMPRESSED_BYTES = _int_env("DIMER_MAX_ARCHIVE_UNCOMPRESSED_BYTES", 1 << 30)
-    MAX_SINGLE_CSV_BYTES = _int_env("DIMER_MAX_SINGLE_CSV_BYTES", 512 << 20)
-    MAX_COMPRESSION_RATIO = _float_env("DIMER_MAX_COMPRESSION_RATIO", 100.0)
-    MAX_TOTAL_ROWS = _int_env("DIMER_MAX_TOTAL_ROWS", 5_000_000)
-    # Reject non-finite / non-positive limits (float() would accept nan/inf and
-    # silently disable the guards; a NaN ratio makes every comparison false).
+    # Parse and validate into locals FIRST; publish globals only after every
+    # check passes, so a malformed value never leaves an invalid global behind
+    # (the crash-path failure callback must still use a valid timeout).
+    callback_timeout = _float_env("DIMER_CALLBACK_TIMEOUT_SECONDS", 10.0)
+    max_sample = _int_env("DIMER_MAX_SAMPLE_FILES", 25)
+    max_archive = _int_env("DIMER_MAX_ARCHIVE_UNCOMPRESSED_BYTES", 1 << 30)
+    max_single = _int_env("DIMER_MAX_SINGLE_CSV_BYTES", 512 << 20)
+    max_ratio = _float_env("DIMER_MAX_COMPRESSION_RATIO", 100.0)
+    max_rows = _int_env("DIMER_MAX_TOTAL_ROWS", 5_000_000)
     for _name, _val in (
-        ("DIMER_CALLBACK_TIMEOUT_SECONDS", CALLBACK_TIMEOUT_SECONDS),
-        ("DIMER_MAX_COMPRESSION_RATIO", MAX_COMPRESSION_RATIO),
+        ("DIMER_CALLBACK_TIMEOUT_SECONDS", callback_timeout),
+        ("DIMER_MAX_COMPRESSION_RATIO", max_ratio),
     ):
         if not math.isfinite(_val) or _val <= 0:
             raise ValueError(f"{_name} must be a positive finite number, got {_val!r}")
     for _name, _val in (
-        ("DIMER_MAX_SAMPLE_FILES", MAX_SAMPLE_FILES),
-        ("DIMER_MAX_ARCHIVE_UNCOMPRESSED_BYTES", MAX_ARCHIVE_UNCOMPRESSED_BYTES),
-        ("DIMER_MAX_SINGLE_CSV_BYTES", MAX_SINGLE_CSV_BYTES),
-        ("DIMER_MAX_TOTAL_ROWS", MAX_TOTAL_ROWS),
+        ("DIMER_MAX_SAMPLE_FILES", max_sample),
+        ("DIMER_MAX_ARCHIVE_UNCOMPRESSED_BYTES", max_archive),
+        ("DIMER_MAX_SINGLE_CSV_BYTES", max_single),
+        ("DIMER_MAX_TOTAL_ROWS", max_rows),
     ):
         if _val <= 0:
             raise ValueError(f"{_name} must be a positive integer, got {_val!r}")
+    global CALLBACK_TIMEOUT_SECONDS, MAX_SAMPLE_FILES, MAX_ARCHIVE_UNCOMPRESSED_BYTES
+    global MAX_SINGLE_CSV_BYTES, MAX_COMPRESSION_RATIO, MAX_TOTAL_ROWS
+    CALLBACK_TIMEOUT_SECONDS = callback_timeout
+    MAX_SAMPLE_FILES = max_sample
+    MAX_ARCHIVE_UNCOMPRESSED_BYTES = max_archive
+    MAX_SINGLE_CSV_BYTES = max_single
+    MAX_COMPRESSION_RATIO = max_ratio
+    MAX_TOTAL_ROWS = max_rows
 
 
 def _json_env(name: str) -> dict[str, Any]:
