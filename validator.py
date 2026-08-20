@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import traceback
@@ -60,6 +61,22 @@ def _load_limits() -> None:
     MAX_SINGLE_CSV_BYTES = _int_env("DIMER_MAX_SINGLE_CSV_BYTES", 512 << 20)
     MAX_COMPRESSION_RATIO = _float_env("DIMER_MAX_COMPRESSION_RATIO", 100.0)
     MAX_TOTAL_ROWS = _int_env("DIMER_MAX_TOTAL_ROWS", 5_000_000)
+    # Reject non-finite / non-positive limits (float() would accept nan/inf and
+    # silently disable the guards; a NaN ratio makes every comparison false).
+    for _name, _val in (
+        ("DIMER_CALLBACK_TIMEOUT_SECONDS", CALLBACK_TIMEOUT_SECONDS),
+        ("DIMER_MAX_COMPRESSION_RATIO", MAX_COMPRESSION_RATIO),
+    ):
+        if not math.isfinite(_val) or _val <= 0:
+            raise ValueError(f"{_name} must be a positive finite number, got {_val!r}")
+    for _name, _val in (
+        ("DIMER_MAX_SAMPLE_FILES", MAX_SAMPLE_FILES),
+        ("DIMER_MAX_ARCHIVE_UNCOMPRESSED_BYTES", MAX_ARCHIVE_UNCOMPRESSED_BYTES),
+        ("DIMER_MAX_SINGLE_CSV_BYTES", MAX_SINGLE_CSV_BYTES),
+        ("DIMER_MAX_TOTAL_ROWS", MAX_TOTAL_ROWS),
+    ):
+        if _val <= 0:
+            raise ValueError(f"{_name} must be a positive integer, got {_val!r}")
 
 
 def _json_env(name: str) -> dict[str, Any]:
@@ -230,19 +247,31 @@ def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[
     checks.append(_check("train_csv_unique", True, f"Using {train_entry.logical_path}."))
 
     try:
-        train = source.read_csv(train_entry)
+        # Bounded read: cap memory at MAX_TOTAL_ROWS+1 rows so a pathological
+        # file is rejected during load, not after fully materializing it.
+        train = source.read_csv(train_entry, nrows=MAX_TOTAL_ROWS + 1)
     except Exception as exc:  # noqa: BLE001
         checks.append(_check("train_csv_parses", False, f"train.csv could not be parsed: {exc}"))
         return checks, meta
-    checks.append(_check("train_csv_parses", True, f"Parsed {len(train)} rows x {train.shape[1]} columns."))
+    over_cap = len(train) > MAX_TOTAL_ROWS
+    checks.append(_check(
+        "train_csv_parses",
+        True,
+        f"Parsed {'>' if over_cap else ''}{len(train)} rows x {train.shape[1]} columns.",
+    ))
 
     columns = list(train.columns)
-    meta.update({"columns": columns, "rowCount": int(len(train))})
+    meta.update({"columns": columns, "rowCount": (f">{MAX_TOTAL_ROWS}" if over_cap else int(len(train)))})
     checks.append(_check(
         "row_count_within_limit",
-        len(train) <= MAX_TOTAL_ROWS,
-        f"train.csv has {len(train)} rows; operational limit is {MAX_TOTAL_ROWS}.",
+        not over_cap,
+        f"train.csv exceeds the {MAX_TOTAL_ROWS}-row operational limit."
+        if over_cap
+        else f"train.csv has {len(train)} rows; operational limit is {MAX_TOTAL_ROWS}.",
     ))
+    if over_cap:
+        return checks, meta  # don't run downstream checks on a truncated frame
+
     has_target = target_column in columns
     checks.append(_check("target_column_present", has_target, f"Target column {target_column!r} found." if has_target else f"Target column {target_column!r} not found."))
     if not has_target:
