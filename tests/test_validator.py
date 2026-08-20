@@ -1,5 +1,7 @@
 import importlib.util
+import json
 import sys
+import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -12,6 +14,12 @@ validator = importlib.util.module_from_spec(SPEC)
 # sys.modules by __module__; unregistered -> AttributeError on 3.11).
 sys.modules["validator"] = validator
 SPEC.loader.exec_module(validator)
+
+
+@pytest.fixture(autouse=True)
+def _reset_limits():
+    validator._load_limits()
+    yield
 
 
 def test_numeric_target_and_usable_rows(tmp_path, monkeypatch):
@@ -50,6 +58,57 @@ def test_non_numeric_target_rejected(tmp_path, monkeypatch):
     finally:
         source.close()
     assert not next(c for c in checks if c["name"] == "target_is_numeric")["successful"]
+
+
+def test_malformed_numeric_env_yields_structured_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("DIMER_MAX_SINGLE_CSV_BYTES", "not-an-int")
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    monkeypatch.setattr(validator, "RESULT_PATH", tmp_path / "result.json")
+    assert validator.main() == 1
+    payload = json.loads((tmp_path / "result.json").read_text())
+    assert payload["successful"] is False
+
+
+def test_compression_ratio_rejected(tmp_path, monkeypatch):
+    zpath = tmp_path / "dataset.zip"
+    with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("train.csv", "x,target\n" + ("0,0\n" * 200_000))  # highly compressible
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    with pytest.raises(ValueError, match="compression ratio"):
+        validator.DatasetSource()
+
+
+def test_row_count_limit_enforced_and_bounded(tmp_path, monkeypatch):
+    monkeypatch.setenv("DIMER_MAX_TOTAL_ROWS", "10")
+    validator._load_limits()
+    pd.DataFrame({"x": range(60), "target": [float(i) for i in range(60)]}).to_csv(tmp_path / "train.csv", index=False)
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    source = validator.DatasetSource()
+    try:
+        checks, meta = validator.build_checks(source, {})
+    finally:
+        source.close()
+    names = {c["name"]: c["successful"] for c in checks}
+    assert names["row_count_within_limit"] is False
+    assert "target_is_numeric" not in names  # early return, no downstream checks
+    assert meta["rowCount"] == ">10"
+
+
+def test_non_finite_limit_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("DIMER_MAX_COMPRESSION_RATIO", "inf")
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    monkeypatch.setattr(validator, "RESULT_PATH", tmp_path / "result.json")
+    assert validator.main() == 1
+    assert json.loads((tmp_path / "result.json").read_text())["successful"] is False
+
+
+def test_invalid_timeout_does_not_corrupt_global(monkeypatch):
+    monkeypatch.setenv("DIMER_CALLBACK_TIMEOUT_SECONDS", "-5")
+    prior = validator.CALLBACK_TIMEOUT_SECONDS
+    with pytest.raises(ValueError):
+        validator._load_limits()
+    assert validator.CALLBACK_TIMEOUT_SECONDS == prior
+    assert validator.CALLBACK_TIMEOUT_SECONDS > 0
 
 
 def test_normalize_member_rejects_traversal_and_absolute():
