@@ -142,3 +142,13 @@ def test_val_split_target_usability_is_validated(tmp_path, monkeypatch):
     finally:
         source.close()
     assert not next(c for c in checks if c["name"] == "val_has_usable_targets")["successful"]
+
+
+def test_validate_entrypoint_delegates_to_validator():
+    # The DIMER-facing `validate.py` entrypoint must expose the same `main` as
+    # the `validator.py` implementation module (no behavioral fork).
+    spec = importlib.util.spec_from_file_location("validate", Path(__file__).parents[1] / "validate.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["validate"] = mod
+    spec.loader.exec_module(mod)
+    assert mod.main is validator.main
