@@ -181,3 +181,16 @@ def test_tasktype_fallback_chain(tmp_path, monkeypatch):
     monkeypatch.setenv("DIMER_PIPELINE_METADATA_JSON", '{"taskType": "from_metadata"}')
     validator.main()
     assert json.loads((tmp_path / "result.json").read_text())["metadata"]["taskType"] == "from_metadata"
+
+
+def test_classnames_present_on_crash_metadata(monkeypatch, tmp_path):
+    # An uncaught crash (run() raises) must still emit classNames: [] in metadata.
+    monkeypatch.setattr(validator, "RESULT_PATH", tmp_path / "result.json")
+
+    def boom() -> int:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(validator, "run", boom)
+    assert validator.main() == 1
+    meta = json.loads((tmp_path / "result.json").read_text())["metadata"]
+    assert meta["classNames"] == []

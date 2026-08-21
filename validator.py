@@ -368,7 +368,7 @@ def main() -> int:
     try:
         return run()
     except Exception as exc:  # noqa: BLE001
-        payload = {"successful": False, "message": "TabICLv2 dataset validator crashed.", "error": {"type": type(exc).__name__, "message": str(exc), "traceback": traceback.format_exc()}, "metadata": {"template": TEMPLATE_NAME}}
+        payload = {"successful": False, "message": "TabICLv2 dataset validator crashed.", "error": {"type": type(exc).__name__, "message": str(exc), "traceback": traceback.format_exc()}, "metadata": {"template": TEMPLATE_NAME, "classNames": []}}
         try:
             write_result(payload)
             notify_done_callback()
