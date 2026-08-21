@@ -152,3 +152,18 @@ def test_validate_entrypoint_delegates_to_validator():
     sys.modules["validate"] = mod
     spec.loader.exec_module(mod)
     assert mod.main is validator.main
+
+
+def test_classnames_empty_array_for_regression(tmp_path, monkeypatch):
+    # classNames is a mandatory DIMER metadata field; a regression pipeline
+    # must emit it as an empty array (never omit it).
+    pd.DataFrame({"x": range(60), "target": [float(i) for i in range(60)]}).to_csv(
+        tmp_path / "train.csv", index=False
+    )
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    source = validator.DatasetSource()
+    try:
+        _checks, meta = validator.build_checks(source, {})
+    finally:
+        source.close()
+    assert meta["classNames"] == []

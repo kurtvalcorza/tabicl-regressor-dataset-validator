@@ -236,7 +236,9 @@ def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[
     target_column = str(preprocessing.get("target_column") or "target").strip()
     drop_columns = [c.strip() for c in str(preprocessing.get("drop_columns") or "").split(",") if c.strip()]
     checks: list[dict[str, Any]] = []
-    meta: dict[str, Any] = {"targetColumn": target_column, "dropColumns": drop_columns}
+    # classNames is a mandatory DIMER metadata field. Regression has no classes,
+    # so it is always the empty array — per the docs' "even if empty" contract.
+    meta: dict[str, Any] = {"targetColumn": target_column, "dropColumns": drop_columns, "classNames": []}
 
     checks.append(_check(
         "target_not_dropped",
