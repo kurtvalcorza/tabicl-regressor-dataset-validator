@@ -236,7 +236,9 @@ def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[
     target_column = str(preprocessing.get("target_column") or "target").strip()
     drop_columns = [c.strip() for c in str(preprocessing.get("drop_columns") or "").split(",") if c.strip()]
     checks: list[dict[str, Any]] = []
-    meta: dict[str, Any] = {"targetColumn": target_column, "dropColumns": drop_columns}
+    # classNames is a mandatory DIMER metadata field. Regression has no classes,
+    # so it is always the empty array — per the docs' "even if empty" contract.
+    meta: dict[str, Any] = {"targetColumn": target_column, "dropColumns": drop_columns, "classNames": []}
 
     checks.append(_check(
         "target_not_dropped",
@@ -351,7 +353,9 @@ def run() -> int:
                 "sampleFiles": source.files[:MAX_SAMPLE_FILES],
             },
             "checks": checks,
-            "metadata": {"template": TEMPLATE_NAME, "taskType": pipeline_metadata.get("taskType", "tabular_regression"), **check_meta},
+            # taskType: DIMER metadata -> baked DIMER_TASK_TYPE env (Custom/Other
+            # pipelines) -> model-family literal.
+            "metadata": {"template": TEMPLATE_NAME, "taskType": pipeline_metadata.get("taskType") or os.getenv("DIMER_TASK_TYPE") or "tabular_regression", **check_meta},
         }
         write_result(payload)
         log(f"Callback: {json.dumps(notify_done_callback(), sort_keys=True)}")
@@ -364,7 +368,7 @@ def main() -> int:
     try:
         return run()
     except Exception as exc:  # noqa: BLE001
-        payload = {"successful": False, "message": "TabICLv2 dataset validator crashed.", "error": {"type": type(exc).__name__, "message": str(exc), "traceback": traceback.format_exc()}, "metadata": {"template": TEMPLATE_NAME}}
+        payload = {"successful": False, "message": "TabICLv2 dataset validator crashed.", "error": {"type": type(exc).__name__, "message": str(exc), "traceback": traceback.format_exc()}, "metadata": {"template": TEMPLATE_NAME, "classNames": []}}
         try:
             write_result(payload)
             notify_done_callback()
