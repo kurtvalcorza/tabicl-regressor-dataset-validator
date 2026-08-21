@@ -167,3 +167,17 @@ def test_classnames_empty_array_for_regression(tmp_path, monkeypatch):
     finally:
         source.close()
     assert meta["classNames"] == []
+
+
+def test_tasktype_fallback_chain(tmp_path, monkeypatch):
+    # taskType resolves DIMER metadata -> baked DIMER_TASK_TYPE env -> literal.
+    pd.DataFrame({"x": range(60), "target": [float(i) for i in range(60)]}).to_csv(tmp_path / "train.csv", index=False)
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    monkeypatch.setattr(validator, "RESULT_PATH", tmp_path / "result.json")
+    monkeypatch.delenv("DIMER_PIPELINE_METADATA_JSON", raising=False)
+    monkeypatch.setenv("DIMER_TASK_TYPE", "baked_type")
+    validator.main()
+    assert json.loads((tmp_path / "result.json").read_text())["metadata"]["taskType"] == "baked_type"
+    monkeypatch.setenv("DIMER_PIPELINE_METADATA_JSON", '{"taskType": "from_metadata"}')
+    validator.main()
+    assert json.loads((tmp_path / "result.json").read_text())["metadata"]["taskType"] == "from_metadata"

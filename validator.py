@@ -353,7 +353,9 @@ def run() -> int:
                 "sampleFiles": source.files[:MAX_SAMPLE_FILES],
             },
             "checks": checks,
-            "metadata": {"template": TEMPLATE_NAME, "taskType": pipeline_metadata.get("taskType", "tabular_regression"), **check_meta},
+            # taskType: DIMER metadata -> baked DIMER_TASK_TYPE env (Custom/Other
+            # pipelines) -> model-family literal.
+            "metadata": {"template": TEMPLATE_NAME, "taskType": pipeline_metadata.get("taskType") or os.getenv("DIMER_TASK_TYPE") or "tabular_regression", **check_meta},
         }
         write_result(payload)
         log(f"Callback: {json.dumps(notify_done_callback(), sort_keys=True)}")
