@@ -194,3 +194,80 @@ def test_classnames_present_on_crash_metadata(monkeypatch, tmp_path):
     assert validator.main() == 1
     meta = json.loads((tmp_path / "result.json").read_text())["metadata"]
     assert meta["classNames"] == []
+
+
+def test_callback_attempted_even_if_write_result_raises(tmp_path, monkeypatch):
+    # The DIMER "UI stuck at Validating..." failure mode: the callback must fire
+    # even when persisting the (crash) result itself raises.
+    calls = []
+    monkeypatch.setattr(validator, "notify_done_callback", lambda: (calls.append(1), {"attempted": True})[1])
+
+    def run_boom() -> int:
+        raise RuntimeError("boom in run")
+
+    def write_boom(_payload) -> None:
+        raise OSError("result mount is read-only")
+
+    monkeypatch.setattr(validator, "run", run_boom)
+    monkeypatch.setattr(validator, "write_result", write_boom)
+    assert validator.main() == 1
+    assert calls == [1]  # attempted exactly once despite write_result failing
+
+
+def test_no_duplicate_callback_on_success(tmp_path, monkeypatch):
+    # Ordinary success path must attempt the callback exactly once.
+    calls = []
+    monkeypatch.setattr(validator, "notify_done_callback", lambda: (calls.append(1), {"attempted": True})[1])
+    pd.DataFrame({"x": range(60), "target": [float(i) for i in range(60)]}).to_csv(tmp_path / "train.csv", index=False)
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    monkeypatch.setattr(validator, "RESULT_PATH", tmp_path / "result.json")
+    assert validator.main() == 0
+    assert calls == [1]
+
+
+def test_crash_metadata_preserves_tasktype(tmp_path, monkeypatch):
+    # Crash-result metadata must carry the taskType fallback, like the normal path.
+    monkeypatch.setattr(validator, "RESULT_PATH", tmp_path / "result.json")
+    monkeypatch.delenv("DIMER_PIPELINE_METADATA_JSON", raising=False)
+    monkeypatch.setenv("DIMER_TASK_TYPE", "baked_type")
+
+    def boom() -> int:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(validator, "run", boom)
+    assert validator.main() == 1
+    meta = json.loads((tmp_path / "result.json").read_text())["metadata"]
+    assert meta["taskType"] == "baked_type"
+    assert meta["classNames"] == []
+
+
+def test_categorical_target_suggests_classifier(tmp_path, monkeypatch):
+    # A predominantly non-numeric (categorical) target should suggest the
+    # classifier pipeline, not merely fail numeric validation.
+    pd.DataFrame({"x": range(60), "target": ["cat", "dog", "bird"] * 20}).to_csv(tmp_path / "train.csv", index=False)
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    source = validator.DatasetSource()
+    try:
+        checks, _ = validator.build_checks(source, {})
+    finally:
+        source.close()
+    numeric_check = next(c for c in checks if c["name"] == "target_is_numeric")
+    assert numeric_check["successful"] is False
+    assert "classifier pipeline" in numeric_check["message"]
+
+
+def test_isolated_bad_values_are_cleaning_error_not_mismatch(tmp_path, monkeypatch):
+    # A mostly-numeric target with a few bad values is a data-cleaning problem,
+    # NOT a pipeline mismatch — it must not recommend the classifier.
+    target = [str(float(i)) for i in range(197)] + ["oops", "bad", "N/A"]
+    pd.DataFrame({"x": range(200), "target": target}).to_csv(tmp_path / "train.csv", index=False)
+    monkeypatch.setattr(validator, "DATASET_DIR", tmp_path)
+    source = validator.DatasetSource()
+    try:
+        checks, _ = validator.build_checks(source, {})
+    finally:
+        source.close()
+    numeric_check = next(c for c in checks if c["name"] == "target_is_numeric")
+    assert numeric_check["successful"] is False
+    assert "classifier" not in numeric_check["message"]
+    assert "clean or remove" in numeric_check["message"]
