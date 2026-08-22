@@ -96,6 +96,20 @@ def _json_env(name: str) -> dict[str, Any]:
     return value
 
 
+def _resolve_task_type(literal_default: str) -> str:
+    """taskType: DIMER metadata -> baked DIMER_TASK_TYPE env -> model literal.
+
+    Reads DIMER_PIPELINE_METADATA_JSON defensively so it is also safe to call
+    from the crash path (a malformed value there must not mask the original
+    error), keeping crash-result metadata consistent with the normal result.
+    """
+    try:
+        task = _json_env("DIMER_PIPELINE_METADATA_JSON").get("taskType")
+    except Exception:  # noqa: BLE001
+        task = None
+    return task or os.getenv("DIMER_TASK_TYPE") or literal_default
+
+
 def log(message: str) -> None:
     print(f"[{TEMPLATE_NAME}] {message}", flush=True)
 
@@ -232,6 +246,32 @@ def _check(name: str, successful: bool, message: str) -> dict[str, Any]:
     return {"name": name, "successful": bool(successful), "message": message}
 
 
+def _numeric_target_message(target: pd.Series, numeric: pd.Series, non_null: int, numeric_non_null: int) -> str:
+    """Message for the target_is_numeric check, with wrong-pipeline guidance.
+
+    A predominantly non-numeric target is genuinely categorical -> suggest the
+    classifier pipeline (DIMER debugging guide). A mostly-numeric target with
+    only isolated bad values is a data-cleaning problem, NOT a pipeline mismatch,
+    so it must not recommend classification.
+    """
+    if numeric_non_null == non_null:
+        return "All non-null target values are numeric."
+    non_numeric = non_null - numeric_non_null
+    frac_non_numeric = (non_numeric / non_null) if non_null else 0.0
+    if frac_non_numeric >= 0.5:
+        coerced_na = numeric.isna() & target.notna()
+        distinct = int(target[coerced_na].nunique())
+        return (
+            f"{non_numeric} of {non_null} non-null targets are non-numeric "
+            f"({distinct} distinct categorical label(s)); this looks like a "
+            "classification target — use the TabICLv2 classifier pipeline instead."
+        )
+    return (
+        f"{non_numeric} of {non_null} non-null target value(s) are not numeric; "
+        "clean or remove these rows (regression targets must be numeric)."
+    )
+
+
 def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     target_column = str(preprocessing.get("target_column") or "target").strip()
     drop_columns = [c.strip() for c in str(preprocessing.get("drop_columns") or "").split(",") if c.strip()]
@@ -291,7 +331,13 @@ def build_checks(source: DatasetSource, preprocessing: dict[str, Any]) -> tuple[
     usable_rows = int(finite_mask.sum())
     distinct_values = int(numeric_target[finite_mask].nunique())
     meta.update({"usableTrainRows": usable_rows, "distinctTargetValues": distinct_values})
-    checks.append(_check("target_is_numeric", bool(numeric_target.notna().sum() == train[target_column].notna().sum()), "All non-null target values are numeric."))
+    non_null = int(train[target_column].notna().sum())
+    numeric_non_null = int(numeric_target.notna().sum())
+    checks.append(_check(
+        "target_is_numeric",
+        numeric_non_null == non_null,
+        _numeric_target_message(train[target_column], numeric_target, non_null, numeric_non_null),
+    ))
     checks.append(_check("target_is_finite", usable_rows == int(train[target_column].notna().sum()), f"{usable_rows} finite numeric target rows found."))
     checks.append(_check("minimum_usable_rows", usable_rows >= MIN_TRAIN_ROWS, f"{usable_rows} usable rows; need at least {MIN_TRAIN_ROWS}."))
     checks.append(_check("target_has_variation", distinct_values >= 2, f"Target has {distinct_values} distinct finite value(s); regression needs variation."))
@@ -358,23 +404,43 @@ def run() -> int:
             "metadata": {"template": TEMPLATE_NAME, "taskType": pipeline_metadata.get("taskType") or os.getenv("DIMER_TASK_TYPE") or "tabular_regression", **check_meta},
         }
         write_result(payload)
-        log(f"Callback: {json.dumps(notify_done_callback(), sort_keys=True)}")
         return 0 if successful else 1
     finally:
         source.close()
 
 
 def main() -> int:
+    # Deliver the done-callback from an OUTER finally so it is attempted exactly
+    # once on EVERY path — success, validation failure, unexpected crash, and
+    # even when write_result() itself raises (broken/read-only/full result
+    # mount). Otherwise DIMER's UI can hang at "Validating..." (docs: callback
+    # timeout). Callback delivery is best-effort and never masks the exit code.
     try:
-        return run()
-    except Exception as exc:  # noqa: BLE001
-        payload = {"successful": False, "message": "TabICLv2 dataset validator crashed.", "error": {"type": type(exc).__name__, "message": str(exc), "traceback": traceback.format_exc()}, "metadata": {"template": TEMPLATE_NAME, "classNames": []}}
         try:
-            write_result(payload)
-            notify_done_callback()
-        except Exception as write_exc:  # noqa: BLE001
-            log(f"Failed to persist crash result: {write_exc}")
-        return 1
+            return run()
+        except Exception as exc:  # noqa: BLE001
+            payload = {
+                "successful": False,
+                "message": "TabICLv2 dataset validator crashed.",
+                "error": {"type": type(exc).__name__, "message": str(exc), "traceback": traceback.format_exc()},
+                # Preserve the taskType fallback chain so crash-result metadata
+                # stays consistent with the normal result.
+                "metadata": {
+                    "template": TEMPLATE_NAME,
+                    "taskType": _resolve_task_type("tabular_regression"),
+                    "classNames": [],
+                },
+            }
+            try:
+                write_result(payload)
+            except Exception as write_exc:  # noqa: BLE001
+                log(f"Failed to persist crash result: {write_exc}")
+            return 1
+    finally:
+        try:
+            log(f"Callback: {json.dumps(notify_done_callback(), sort_keys=True)}")
+        except Exception as cb_exc:  # noqa: BLE001
+            log(f"Callback delivery (best-effort) failed: {cb_exc}")
 
 
 if __name__ == "__main__":
