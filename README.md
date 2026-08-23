@@ -23,5 +23,7 @@ cleaning.
 The validator reports pass/fail per check in `result.json` and rejects duplicate split candidates,
 nested zips, path-traversal members, and oversized / zip-bomb archives (≤1 GiB uncompressed,
 ≤512 MiB per CSV, compression-ratio guard). A predominantly non-numeric target triggers
-wrong-pipeline guidance toward the classifier. All limits are overridable by platform environment
-variables. See the project's dataset specification for the full rules.
+wrong-pipeline guidance toward the classifier. The archive/resource guards (uncompressed size,
+per-CSV size, compression ratio, total-row cap) are overridable by platform environment variables;
+the usable-row and feature thresholds are fixed operational limits. See the project's dataset
+specification for the full rules.
