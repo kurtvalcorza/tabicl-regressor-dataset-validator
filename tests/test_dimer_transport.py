@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -100,6 +101,10 @@ def test_stage_size_limit_is_enforced_before_download(tmp_path, monkeypatch):
 def test_entrypoint_staging_failure_persists_result_and_callbacks(tmp_path, monkeypatch):
     result_path = tmp_path / "result.json"
     calls = []
+    # tests/test_validator.py intentionally loads a separate validator module and
+    # registers it in sys.modules during collection. Pin this test's imported
+    # module so the lazy import inside dimer_entrypoint sees the object patched here.
+    monkeypatch.setitem(sys.modules, "validator", validator)
     monkeypatch.setattr(dimer_entrypoint, "stage_dataset_if_needed", lambda: (_ for _ in ()).throw(RuntimeError("stage failed")))
     monkeypatch.setattr(validator, "RESULT_PATH", result_path)
     monkeypatch.setattr(validator, "notify_done_callback", lambda: (calls.append(1), {"attempted": True})[1])
