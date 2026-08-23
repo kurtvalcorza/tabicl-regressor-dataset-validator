@@ -12,5 +12,5 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt pytest
-      - run: python -m py_compile validator.py
+      - run: python -m py_compile validator.py validate.py dimer_transport.py dimer_entrypoint.py
       - run: pytest -q
